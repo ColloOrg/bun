@@ -13,6 +13,7 @@
 #include "BunClientData.h"
 #include "wtf/Compiler.h"
 #include "wtf/Forward.h"
+#include "TenantContext.h"
 
 using namespace JSC;
 
@@ -20,6 +21,14 @@ extern "C" size_t Bun__getEnvCount(JSGlobalObject* globalObject, void** list_ptr
 extern "C" size_t Bun__getEnvKey(void* list, size_t index, unsigned char** out);
 
 extern "C" bool Bun__getEnvValue(JSGlobalObject* globalObject, ZigString* name, ZigString* value);
+
+// ════════════════════════════════════════════════════════════════
+// Multi-tenant support - TenantContext C API
+// ════════════════════════════════════════════════════════════════
+extern "C" Bun::TenantContext* Zig__GlobalObject__getTenantContext(JSC::JSGlobalObject*);
+extern "C" size_t TenantContext__getEnv(Bun::TenantContext*, const char*, size_t, char*, size_t);
+extern "C" void TenantContext__setEnv(Bun::TenantContext*, const char*, size_t, const char*, size_t);
+extern "C" bool TenantContext__hasEnv(Bun::TenantContext*, const char*, size_t);
 
 namespace Bun {
 
@@ -34,6 +43,46 @@ JSC_DEFINE_CUSTOM_GETTER(jsGetterEnvironmentVariable, (JSGlobalObject * globalOb
     if (!thisObject) [[unlikely]]
         return JSValue::encode(jsUndefined());
 
+    // ════════════════════════════════════════════════════════════
+    // Multi-tenant support: Check TenantContext first
+    // ════════════════════════════════════════════════════════════
+    if (auto* tenantCtx = Zig__GlobalObject__getTenantContext(globalObject)) {
+        auto propertyNameString = propertyName.publicName();
+        if (propertyNameString.isNull()) [[unlikely]]
+            return JSValue::encode(jsUndefined());
+
+        auto utf8 = propertyNameString.utf8();
+
+        // Buffer for tenant env value (4KB sufficient for env vars)
+        char buffer[4096];
+        size_t len = TenantContext__getEnv(
+            tenantCtx,
+            utf8.data(),
+            utf8.length(),
+            buffer,
+            sizeof(buffer));
+
+        // SIZE_MAX = key not found in tenant (isolation: don't fall back to system)
+        if (len == SIZE_MAX) {
+            return JSValue::encode(jsUndefined());
+        }
+
+        // len == 0 = empty string (valid)
+        if (len == 0) {
+            JSValue result = jsEmptyString(vm);
+            thisObject->putDirect(vm, propertyName, result, 0);
+            return JSValue::encode(result);
+        }
+
+        // Found value in tenant
+        JSValue result = jsString(vm, String::fromUTF8(std::span { buffer, len }));
+        thisObject->putDirect(vm, propertyName, result, 0);
+        return JSValue::encode(result);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // No TenantContext = original behavior (system env)
+    // ════════════════════════════════════════════════════════════
     ZigString name = toZigString(propertyName.publicName());
     ZigString value = { nullptr, 0 };
 
@@ -60,6 +109,31 @@ JSC_DEFINE_CUSTOM_SETTER(jsSetterEnvironmentVariable, (JSGlobalObject * globalOb
     if (!string) [[unlikely]]
         return false;
 
+    // ════════════════════════════════════════════════════════════
+    // Multi-tenant support: Write to tenant.env if present
+    // ════════════════════════════════════════════════════════════
+    if (auto* tenantCtx = Zig__GlobalObject__getTenantContext(globalObject)) {
+        auto propertyNameString = propertyName.publicName();
+        if (propertyNameString.isNull()) [[unlikely]]
+            return false;
+
+        auto keyUtf8 = propertyNameString.utf8();
+        auto valueStr = string->value(globalObject);
+        auto valueUtf8 = valueStr.utf8();
+
+        TenantContext__setEnv(
+            tenantCtx,
+            keyUtf8.data(), keyUtf8.length(),
+            valueUtf8.data(), valueUtf8.length());
+
+        // Update local cache on object
+        object->putDirect(vm, propertyName, string, 0);
+        return true;
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // No TenantContext = original behavior
+    // ════════════════════════════════════════════════════════════
     object->putDirect(vm, propertyName, string, 0);
     return true;
 }
@@ -75,14 +149,36 @@ JSC_DEFINE_CUSTOM_GETTER(jsTimeZoneEnvironmentVariableGetter, (JSGlobalObject * 
 
     auto* clientData = WebCore::clientData(vm);
 
-    ZigString name = toZigString(propertyName.publicName());
-    ZigString value = { nullptr, 0 };
-
     auto hasExistingValue = thisObject->getIfPropertyExists(globalObject, clientData->builtinNames().dataPrivateName());
     RETURN_IF_EXCEPTION(scope, {});
     if (hasExistingValue) {
         return JSValue::encode(hasExistingValue);
     }
+
+    // ════════════════════════════════════════════════════════════
+    // Multi-tenant support: Check TenantContext first
+    // ════════════════════════════════════════════════════════════
+    if (auto* tenantCtx = Zig__GlobalObject__getTenantContext(globalObject)) {
+        auto propertyNameString = propertyName.publicName();
+        auto utf8 = propertyNameString.utf8();
+
+        char buffer[4096];
+        size_t len = TenantContext__getEnv(tenantCtx, utf8.data(), utf8.length(), buffer, sizeof(buffer));
+
+        if (len == SIZE_MAX || len == 0) {
+            return JSValue::encode(jsUndefined());
+        }
+
+        JSValue out = jsString(vm, String::fromUTF8(std::span { buffer, len }));
+        thisObject->putDirect(vm, clientData->builtinNames().dataPrivateName(), out, 0);
+        return JSValue::encode(out);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // No TenantContext = original behavior
+    // ════════════════════════════════════════════════════════════
+    ZigString name = toZigString(propertyName.publicName());
+    ZigString value = { nullptr, 0 };
 
     if (!Bun__getEnvValue(globalObject, &name, &value) || value.len == 0) {
         return JSValue::encode(jsUndefined());
@@ -105,12 +201,31 @@ JSC_DEFINE_CUSTOM_SETTER(jsTimeZoneEnvironmentVariableSetter, (JSGlobalObject * 
         return false;
 
     JSValue decodedValue = JSValue::decode(value);
+
+    // Apply timezone side-effect (affects shared VM)
     if (decodedValue.isString()) {
         auto timeZoneName = decodedValue.toWTFString(globalObject);
         if (timeZoneName.length() < 32) {
             if (WTF::setTimeZoneOverride(timeZoneName)) {
                 vm.dateCache.resetIfNecessarySlow();
             }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // Multi-tenant support: Write to tenant.env if present
+    // ════════════════════════════════════════════════════════════
+    if (auto* tenantCtx = Zig__GlobalObject__getTenantContext(globalObject)) {
+        if (decodedValue.isString()) {
+            auto propertyNameString = propertyName.publicName();
+            auto keyUtf8 = propertyNameString.utf8();
+            auto valueStr = decodedValue.toWTFString(globalObject);
+            auto valueUtf8 = valueStr.utf8();
+
+            TenantContext__setEnv(
+                tenantCtx,
+                keyUtf8.data(), keyUtf8.length(),
+                valueUtf8.data(), valueUtf8.length());
         }
     }
 
@@ -163,6 +278,26 @@ JSC_DEFINE_CUSTOM_GETTER(jsNodeTLSRejectUnauthorizedGetter, (JSGlobalObject * gl
         return JSValue::encode(result);
     }
 
+    // ════════════════════════════════════════════════════════════
+    // Multi-tenant support: Check TenantContext first
+    // ════════════════════════════════════════════════════════════
+    if (auto* tenantCtx = Zig__GlobalObject__getTenantContext(globalObject)) {
+        auto propertyNameString = propertyName.publicName();
+        auto utf8 = propertyNameString.utf8();
+
+        char buffer[4096];
+        size_t len = TenantContext__getEnv(tenantCtx, utf8.data(), utf8.length(), buffer, sizeof(buffer));
+
+        if (len == SIZE_MAX || len == 0) {
+            return JSValue::encode(jsUndefined());
+        }
+
+        return JSValue::encode(jsString(vm, String::fromUTF8(std::span { buffer, len })));
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // No TenantContext = original behavior
+    // ════════════════════════════════════════════════════════════
     ZigString name = toZigString(propertyName.publicName());
     ZigString value = { nullptr, 0 };
 
@@ -185,12 +320,27 @@ JSC_DEFINE_CUSTOM_SETTER(jsNodeTLSRejectUnauthorizedSetter, (JSGlobalObject * gl
     WTF::String str = decodedValue.toWTFString(globalObject);
     RETURN_IF_EXCEPTION(scope, false);
 
+    // Apply side-effect (affects shared VM/global state)
     // TODO: only check "0". Node doesn't check both. But we already did. So we
     // should wait to do that until Bun v1.2.0.
     if (str == "0"_s || str == "false"_s) {
         Bun__setTLSRejectUnauthorizedValue(0);
     } else {
         Bun__setTLSRejectUnauthorizedValue(1);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // Multi-tenant support: Write to tenant.env if present
+    // ════════════════════════════════════════════════════════════
+    if (auto* tenantCtx = Zig__GlobalObject__getTenantContext(globalObject)) {
+        auto propertyNameString = propertyName.publicName();
+        auto keyUtf8 = propertyNameString.utf8();
+        auto valueUtf8 = str.utf8();
+
+        TenantContext__setEnv(
+            tenantCtx,
+            keyUtf8.data(), keyUtf8.length(),
+            valueUtf8.data(), valueUtf8.length());
     }
 
     const auto& privateName = NODE_TLS_REJECT_UNAUTHORIZED_PRIVATE_PROPERTY(vm);
@@ -217,6 +367,26 @@ JSC_DEFINE_CUSTOM_GETTER(jsBunConfigVerboseFetchGetter, (JSGlobalObject * global
         return JSValue::encode(result);
     }
 
+    // ════════════════════════════════════════════════════════════
+    // Multi-tenant support: Check TenantContext first
+    // ════════════════════════════════════════════════════════════
+    if (auto* tenantCtx = Zig__GlobalObject__getTenantContext(globalObject)) {
+        auto propertyNameString = propertyName.publicName();
+        auto utf8 = propertyNameString.utf8();
+
+        char buffer[4096];
+        size_t len = TenantContext__getEnv(tenantCtx, utf8.data(), utf8.length(), buffer, sizeof(buffer));
+
+        if (len == SIZE_MAX || len == 0) {
+            return JSValue::encode(jsUndefined());
+        }
+
+        return JSValue::encode(jsString(vm, String::fromUTF8(std::span { buffer, len })));
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // No TenantContext = original behavior
+    // ════════════════════════════════════════════════════════════
     ZigString name = toZigString(propertyName.publicName());
     ZigString value = { nullptr, 0 };
 
@@ -239,12 +409,27 @@ JSC_DEFINE_CUSTOM_SETTER(jsBunConfigVerboseFetchSetter, (JSGlobalObject * global
     WTF::String str = decodedValue.toWTFString(globalObject);
     RETURN_IF_EXCEPTION(scope, false);
 
+    // Apply side-effect (affects shared VM/global state)
     if (str == "1"_s || str == "true"_s) {
         Bun__setVerboseFetchValue(1);
     } else if (str == "curl"_s) {
         Bun__setVerboseFetchValue(2);
     } else {
         Bun__setVerboseFetchValue(0);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // Multi-tenant support: Write to tenant.env if present
+    // ════════════════════════════════════════════════════════════
+    if (auto* tenantCtx = Zig__GlobalObject__getTenantContext(globalObject)) {
+        auto propertyNameString = propertyName.publicName();
+        auto keyUtf8 = propertyNameString.utf8();
+        auto valueUtf8 = str.utf8();
+
+        TenantContext__setEnv(
+            tenantCtx,
+            keyUtf8.data(), keyUtf8.length(),
+            valueUtf8.data(), valueUtf8.length());
     }
 
     const auto& privateName = BUN_CONFIG_VERBOSE_FETCH_PRIVATE_PROPERTY(vm);
