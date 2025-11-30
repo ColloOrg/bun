@@ -5,11 +5,7 @@
 extern "C" {
 
 Bun::TenantContext* TenantContext__create(uint64_t id) {
-    try {
-        return new Bun::TenantContext(id);
-    } catch (...) {
-        return nullptr;
-    }
+    return new Bun::TenantContext(id);
 }
 
 void TenantContext__destroy(Bun::TenantContext* ctx) {

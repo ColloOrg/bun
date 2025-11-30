@@ -21,8 +21,6 @@ namespace Bun {
 // ════════════════════════════════════════════════════════════════
 
 class TenantContext {
-    WTF_MAKE_FAST_ALLOCATED;
-
 public:
     uint64_t id;
     WTF::String name;
