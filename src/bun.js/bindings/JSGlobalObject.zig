@@ -1005,3 +1005,26 @@ const ErrorableString = jsc.ErrorableString;
 const JSValue = jsc.JSValue;
 const VM = jsc.VM;
 const ZigString = jsc.ZigString;
+
+// TenantContext - Multi-Tenant Support
+pub const TenantContext = opaque {};
+
+// C API
+extern fn Zig__GlobalObject__getTenantContext(*JSGlobalObject) ?*TenantContext;
+extern fn Zig__GlobalObject__isTenantActive(*JSGlobalObject) bool;
+
+extern fn TenantContext__create(id: u64) ?*TenantContext;
+extern fn TenantContext__destroy(ctx: *TenantContext) void;
+
+extern fn TenantContext__isActive(ctx: *TenantContext) bool;
+extern fn TenantContext__startDraining(ctx: *TenantContext) void;
+extern fn TenantContext__terminate(ctx: *TenantContext) void;
+
+extern fn TenantContext__tryIncrementTimerCount(ctx: *TenantContext) bool;
+extern fn TenantContext__tryIncrementFetchCount(ctx: *TenantContext) bool;
+extern fn TenantContext__decrementTimerCount(ctx: *TenantContext) void;
+extern fn TenantContext__decrementFetchCount(ctx: *TenantContext) void;
+
+extern fn TenantContext__setEnv(ctx: *TenantContext, key: [*]const u8, key_len: usize, value: [*]const u8, value_len: usize) void;
+extern fn TenantContext__getEnv(ctx: *TenantContext, key: [*]const u8, key_len: usize, out_buffer: [*]u8, buffer_size: usize) usize;
+extern fn TenantContext__hasEnv(ctx: *TenantContext, key: [*]const u8, key_len: usize) bool;

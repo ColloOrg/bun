@@ -32,6 +32,7 @@ class InternalModuleRegistry;
 class NapiHandleScopeImpl;
 class JSNextTickQueue;
 class Process;
+class TenantContext;
 } // namespace Bun
 
 namespace v8 {
@@ -98,6 +99,9 @@ class GlobalObject : public Bun::GlobalScope {
 public:
     // Move this to the front for better cache locality.
     void* m_bunVM;
+
+    // TenantContext for multi-tenant isolation
+    Bun::TenantContext* m_tenantContext = nullptr;
 
     bool isShuttingDown() const
     {
@@ -725,6 +729,17 @@ public:
     Ref<NapiEnv> makeNapiEnv(const napi_module&);
     napi_env makeNapiEnvForFFI();
     bool hasNapiFinalizers() const;
+
+    // TenantContext API
+    ALWAYS_INLINE Bun::TenantContext* tenantContext() const {
+        return m_tenantContext;
+    }
+
+    ALWAYS_INLINE void setTenantContext(Bun::TenantContext* ctx) {
+        m_tenantContext = ctx;
+    }
+
+    bool isTenantActive() const;  // Implementation in .cpp
 
 private:
     DOMGuardedObjectSet m_guardedObjects WTF_GUARDED_BY_LOCK(m_gcLock);

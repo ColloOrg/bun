@@ -1,6 +1,7 @@
 #include "root.h"
 
 #include "ZigGlobalObject.h"
+#include "TenantContext.h"
 #include "helpers.h"
 #include "JavaScriptCore/ArgList.h"
 #include "JavaScriptCore/JSCellButterfly.h"
@@ -3608,4 +3609,27 @@ JSC_DEFINE_HOST_FUNCTION(jsFunctionCreateFunctionThatMasqueradesAsUndefined, (JS
     scope.assertNoException();
     auto* func = InternalFunction::createFunctionThatMasqueradesAsUndefined(vm, leixcalGlobalObject, count, name, jsFunctionNotImplemented);
     return JSC::JSValue::encode(func);
+}
+
+// TenantContext implementation
+bool Zig::GlobalObject::isTenantActive() const {
+    return m_tenantContext == nullptr || m_tenantContext->isActive();
+}
+
+extern "C" Bun::TenantContext* Zig__GlobalObject__getTenantContext(
+    JSC::JSGlobalObject* globalObject
+) {
+    if (!globalObject)
+        return nullptr;
+
+    auto* zigGlobal = jsDynamicCast<Zig::GlobalObject*>(globalObject);
+    return zigGlobal ? zigGlobal->tenantContext() : nullptr;
+}
+
+extern "C" bool Zig__GlobalObject__isTenantActive(JSC::JSGlobalObject* globalObject) {
+    if (!globalObject)
+        return true;
+
+    auto* zigGlobal = jsDynamicCast<Zig::GlobalObject*>(globalObject);
+    return zigGlobal ? zigGlobal->isTenantActive() : true;
 }
